@@ -25,7 +25,6 @@ import android.content.Context;
 import com.tungsten.fcl.R;
 import com.mio.util.AndroidUtilKt;
 import com.tungsten.fcl.util.FXUtils;
-import com.tungsten.fcl.util.RegionUtils;
 import com.tungsten.fclcore.download.ArtifactMalformedException;
 import com.tungsten.fclcore.download.AutoDownloadProvider;
 import com.tungsten.fclcore.download.BMCLAPIDownloadProvider;
@@ -36,6 +35,7 @@ import com.tungsten.fclcore.task.DownloadException;
 import com.tungsten.fclcore.task.FetchTask;
 import com.tungsten.fclcore.util.StringUtils;
 import com.tungsten.fclcore.util.io.ResponseCodeException;
+import com.tungsten.fcllibrary.util.LocaleUtils;
 
 import javax.net.ssl.SSLHandshakeException;
 import java.io.FileNotFoundException;
@@ -101,7 +101,7 @@ public final class DownloadProviders {
         DownloadSource normalized = source != null ? source : DownloadSource.DEFAULT;
         switch (normalized) {
             case DEFAULT:
-                return RegionUtils.isChinaMainlandMachine()
+                return LocaleUtils.IS_CHINA_MAINLAND
                         ? List.of(BMCLAPI_PROVIDER, MOJANG_PROVIDER)
                         : List.of(MOJANG_PROVIDER, BMCLAPI_PROVIDER);
             case OFFICIAL:
