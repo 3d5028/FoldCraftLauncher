@@ -19,6 +19,15 @@
 🌍 **语言**  
 简体中文 | [English](./README_EN.md) | [Русский язык](./README_RU.md)
 
+> ⚠️ **本分支声明 / Notice for this branch (`research-opt`)**
+>
+> - **AI 声明**：本分支的代码修改（移除区域下载限制、激进编译优化、本文档声明）由 AI 大语言模型辅助生成与完成，提交记录中已标注。
+> - **仅供研究**：本分支及其构建产物**仅供学习与技术研究使用**，请勿用于商业用途；本版本非 FCL-Team 官方发布，与上游官方版本存在差异。
+> - **风险自担**：本版本采用 debug 签名（与官方签名不同），且开启了未经过上游充分测试的激进编译优化（R8 代码压缩 / native `-O3`），使用本分支代码或构建产物产生的一切风险由使用者自行承担。
+> - **开源义务**：本项目基于 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html)，本分支源码完整开放于此仓库，分发二进制时请同时提供对应源码。
+>
+> This branch contains **AI-assisted modifications** and is **for research / educational purposes only**. It is NOT an official FCL-Team release. Use at your own risk.
+
 > 你说得对，但是[「FoldCraft Launcher」](https://github.com/FCL-Team/FoldCraftLauncher)是由[FCL-Team](https://github.com/FCL-Team)基于[HMCL](https://github.com/HMCL-dev/HMCL)的核心功能，使用[PojavLauncher](https://github.com/PojavLauncherTeam/PojavLauncher)后端开发的[Minecraft](https://www.minecraft.net/) [Java](https://baike.baidu.com/item/Java%E5%B9%B3%E5%8F%B0/3793459)版启动器。启动器运行在一个被称作[「安卓」](https://baike.baidu.com/item/android/60243)的系统，在这里，被系统选中的人将被授予「JVM」，导引[Java](https://baike.baidu.com/item/Java%E5%B9%B3%E5%8F%B0/3793459)之力。你将扮演一位名为「小白」的神秘用户，在自由的使用中安装不同版本、各有千秋独特的[模组](https://baike.baidu.com/item/%E6%A8%A1%E7%BB%84/58377440)，和它们一起运行，找出崩溃闪退的原因，同时逐步发掘「xxException:」的真相。
 
 > ✨ **项目简介**  

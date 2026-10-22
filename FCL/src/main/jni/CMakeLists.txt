@@ -6,6 +6,11 @@ project("fcl")
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 11)
 
+# 激进优化（research-opt 分支，AI 辅助）：
+# fordebug 变体为 debuggable，AGP 会传 CMAKE_BUILD_TYPE=Debug（-O0 -g）；
+# 通过 COMPILE_OPTIONS 追加 -O3（clang 后者覆盖前者），NDEBUG 关闭 assert 开销。
+add_compile_options(-O3 -DNDEBUG)
+
 # 查找ByteHook库
 find_package(bytehook REQUIRED CONFIG)
 
