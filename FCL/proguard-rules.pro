@@ -63,6 +63,9 @@
 }
 
 # ---------- 第三方原始 jar/aar 无 consumer 规则，缺失类警告属预期 ----------
+# slf4j-api 无绑定实现，LoggerFactory.bind() 运行时会自行降级（R8 缺类报错）
+-dontwarn org.slf4j.impl.StaticLoggerBinder
+-dontwarn org.slf4j.**
 -dontwarn org.nanohttpd.**
 -dontwarn org.jsoup.**
 -dontwarn org.apache.commons.**
