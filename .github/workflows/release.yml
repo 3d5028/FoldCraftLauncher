@@ -1,38 +1,73 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "*"
+  workflow_run:
+    workflows:
+      - Build
+    types:
+      - completed
+
+permissions:
+  contents: write
+  actions: read
 
 jobs:
-  build:
-    uses: ./.github/workflows/build.yml
-    secrets: inherit
-
   release:
-    needs: build
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Download apks
+      - name: Compose tag and notes
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          VERSION=$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' FCL/build.gradle.kts | head -1)
+          if [ -z "$VERSION" ]; then VERSION=build; fi
+          SHORT_SHA=$(printf '%s' "$HEAD_SHA" | cut -c1-8)
+          TAG="${VERSION}-${SHORT_SHA}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists, skip to avoid overwrite."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          SUBJECT=$(printf '%s' "$HEAD_MESSAGE" | head -n 1)
+          {
+            echo "## ${SUBJECT}"
+            echo ""
+            echo "- **分支**: \`${HEAD_BRANCH}\`"
+            echo "- **提交**: \`${HEAD_SHA}\`"
+            echo "- **CI**: ${RUN_URL}"
+            echo "- **构建时间**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo ""
+            echo "> ⚠️ CI 自动发布的构建产物（AI 辅助研究用途），仅供研究学习，使用风险自担。"
+          } > NOTES.md
+
+      - name: Download artifacts
+        if: steps.meta.outputs.exists == 'false'
         uses: actions/download-artifact@v6
         with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           path: apks
 
-      - name: Extract changelog for current version
-        run: |
-          awk -v tag="$GITHUB_REF_NAME" '
-            $0 ~ "^## \\[" tag "\\]" { found = 1; next }
-            found && $0 ~ "^## \\[" { exit }
-            found { print }
-          ' CHANGELOG.md > RELEASE_BODY.md
-
-      - name: Release
+      - name: Create release
+        if: steps.meta.outputs.exists == 'false'
         uses: softprops/action-gh-release@v3
         with:
-          token: ${{ secrets.TOKEN }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.event.workflow_run.head_sha }}
+          prerelease: true
+          body_path: NOTES.md
           files: apks/**/*.apk
-          body_path: RELEASE_BODY.md
+          fail_on_unmatched_files: true
