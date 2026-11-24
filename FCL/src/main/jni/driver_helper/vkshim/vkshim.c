@@ -44,12 +44,21 @@
 // fns_emulated 表示核心能力位 fillModeNonSolid 原生缺失，需模拟（谎报 + 管线降级）；
 // divisor_feature / zero_divisor_feature 为驱动对两个 divisor 特性位的报告值，
 // 启用驱动不支持的位会让设备创建失败（VK_ERROR_FEATURE_NOT_PRESENT）
+// divisor_liar 表示驱动既无 EXT 也无 KHR divisor 扩展名（Mali blob 常见形态）：
+//   谎报 EXT 名与 vertexAttributeInstanceRateDivisor 特性位——硬件层 per-instance
+//   步进 divisor=1 是 VK_VERTEX_INPUT_RATE_INSTANCE 的核心语义，驱动会忽略未知的
+//   divisor 管线结构并按默认 divisor=1 执行，与 MC 实际用法一致；zero divisor 位不谎报。
+// push_desc_emulated 表示驱动缺 VK_KHR_push_descriptor：谎报扩展名、剥除启用名单与
+//   管线/集合布局的 push 标志，vkCmdPushDescriptorSetKHR 以影子集合模拟
+//   （更新影子集后立即绑定，语义等价于常规描述符更新+绑定）。
 struct driver_mode {
     bool translate;
     bool add_khr;
     bool fns_emulated;
     bool divisor_feature;
     bool zero_divisor_feature;
+    bool divisor_liar;
+    bool push_desc_emulated;
 };
 
 // 已创建的逻辑设备是否处于 fillModeNonSolid 模拟（管线降级只对这些设备生效）
@@ -86,6 +95,14 @@ static struct {
     PFN_vkCreateDevice create_device;
     // device 级命令，经实例级 gipa 解析到的 trampoline，按传入 device 分派
     PFN_vkCreateGraphicsPipelines create_graphics_pipelines;
+    PFN_vkCreateComputePipelines create_compute_pipelines;
+    PFN_vkCreateDescriptorSetLayout create_descriptor_set_layout;
+    PFN_vkCreatePipelineLayout create_pipeline_layout;
+    PFN_vkCreateDescriptorPool create_descriptor_pool;
+    PFN_vkAllocateDescriptorSets allocate_descriptor_sets;
+    PFN_vkUpdateDescriptorSets update_descriptor_sets;
+    PFN_vkCmdBindDescriptorSets cmd_bind_descriptor_sets;
+    PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor_set;
 } real;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -109,8 +126,19 @@ static void shim_get_physical_device_features2_khr(VkPhysicalDevice physicalDevi
 static VkResult shim_create_device(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* pCreateInfo,
                                    const VkAllocationCallbacks* pAllocator, VkDevice* pDevice);
 static VkResult shim_create_graphics_pipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
-                                               const VkGraphicsPipelineCreateInfo* pCreateInfos,
-                                               const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines);
+                                                const VkGraphicsPipelineCreateInfo* pCreateInfos,
+                                                const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines);
+static VkResult shim_create_compute_pipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
+                                              const VkComputePipelineCreateInfo* pCreateInfos,
+                                              const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines);
+static VkResult shim_create_descriptor_set_layout(VkDevice device, const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+                                                  const VkAllocationCallbacks* pAllocator,
+                                                  VkDescriptorSetLayout* pSetLayout);
+static VkResult shim_create_pipeline_layout(VkDevice device, const VkPipelineLayoutCreateInfo* pCreateInfo,
+                                            const VkAllocationCallbacks* pAllocator, VkPipelineLayout* pPipelineLayout);
+static void shim_cmd_push_descriptor_set(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+                                         VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
+                                         const VkWriteDescriptorSet* pDescriptorWrites);
 
 static bool extension_list_contains(const VkExtensionProperties* list, uint32_t count, const char* name) {
     for (uint32_t i = 0; i < count; i++) {
@@ -160,11 +188,12 @@ static struct driver_mode compute_driver_mode(VkPhysicalDevice physicalDevice) {
     }
     bool hasExt = extension_list_contains(list, count, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     bool hasKHR = extension_list_contains(list, count, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+    bool hasPush = extension_list_contains(list, count, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     free(list);
 
+    mode.push_desc_emulated = !hasPush;
     if (hasExt) return mode;
-    // 仅在驱动声明 KHR 扩展时合成；经启动器检测门控后本函数只应在该形态下被启用，
-    // 无 KHR 扩展名的设备（含仅 Vulkan 1.3 核心功能者）不做合成
+    // 仅在驱动声明 KHR 扩展时合成；两者皆无时走下方谎报分支
     if (hasKHR) {
         mode.translate = true;
         mode.add_khr = true;
@@ -185,7 +214,13 @@ static struct driver_mode compute_driver_mode(VkPhysicalDevice physicalDevice) {
         } else {
             mode.divisor_feature = true;
         }
+        return mode;
     }
+    // 驱动既不报 EXT 也不报 KHR（Mali blob 常见形态）：谎报 EXT 名并置位 divisor 特性，
+    // zero divisor 位保持 false（MC 必需项仅为 vertexAttributeInstanceRateDivisor）
+    mode.divisor_liar = true;
+    mode.divisor_feature = true;
+    mode.zero_divisor_feature = false;
     return mode;
 }
 
@@ -213,9 +248,9 @@ static struct driver_mode driver_mode_of(VkPhysicalDevice physicalDevice) {
     // 并发首查由登记前的重查兜底（重复登记无害但避免）
     struct driver_mode mode = compute_driver_mode(physicalDevice);
     mode.fns_emulated = compute_fns_emulated(physicalDevice);
-    FCL_LOG("vkshim: pd %p mode translate=%d add_khr=%d fns_emulated=%d divisor_feat=%d zero_divisor_feat=%d",
+    FCL_LOG("vkshim: pd %p mode translate=%d add_khr=%d fns_emulated=%d divisor_feat=%d zero_divisor_feat=%d liar=%d push_emu=%d",
             physicalDevice, mode.translate, mode.add_khr, mode.fns_emulated, mode.divisor_feature,
-            mode.zero_divisor_feature);
+            mode.zero_divisor_feature, mode.divisor_liar, mode.push_desc_emulated);
     pthread_mutex_lock(&g_lock);
     bool registered = false;
     for (int i = 0; i < g_physical_device_count; i++) {
@@ -256,6 +291,23 @@ static void ensure_instance_procs(const void* dispatchable) {
         // device 级 trampoline，按后续传入的 device 分派，全局解析一次即可
         real.create_graphics_pipelines = (PFN_vkCreateGraphicsPipelines) real_get_instance_proc_addr(
                 (VkInstance) dispatchable, "vkCreateGraphicsPipelines");
+        real.create_compute_pipelines = (PFN_vkCreateComputePipelines) real_get_instance_proc_addr(
+                (VkInstance) dispatchable, "vkCreateComputePipelines");
+        real.create_descriptor_set_layout = (PFN_vkCreateDescriptorSetLayout) real_get_instance_proc_addr(
+                (VkInstance) dispatchable, "vkCreateDescriptorSetLayout");
+        real.create_pipeline_layout = (PFN_vkCreatePipelineLayout) real_get_instance_proc_addr(
+                (VkInstance) dispatchable, "vkCreatePipelineLayout");
+        real.create_descriptor_pool = (PFN_vkCreateDescriptorPool) real_get_instance_proc_addr(
+                (VkInstance) dispatchable, "vkCreateDescriptorPool");
+        real.allocate_descriptor_sets = (PFN_vkAllocateDescriptorSets) real_get_instance_proc_addr(
+                (VkInstance) dispatchable, "vkAllocateDescriptorSets");
+        real.update_descriptor_sets = (PFN_vkUpdateDescriptorSets) real_get_instance_proc_addr(
+                (VkInstance) dispatchable, "vkUpdateDescriptorSets");
+        real.cmd_bind_descriptor_sets = (PFN_vkCmdBindDescriptorSets) real_get_instance_proc_addr(
+                (VkInstance) dispatchable, "vkCmdBindDescriptorSets");
+        // 驱动不支持 push_descriptor 时加载器可能返回 NULL，仅原生设备直通时需要
+        real.cmd_push_descriptor_set = (PFN_vkCmdPushDescriptorSetKHR) real_get_instance_proc_addr(
+                (VkInstance) dispatchable, "vkCmdPushDescriptorSetKHR");
     }
     pthread_mutex_unlock(&g_lock);
 }
@@ -299,7 +351,12 @@ static VkResult shim_enumerate_device_extension_properties(VkPhysicalDevice phys
     if (real.enumerate_device_extension_properties == NULL) return VK_ERROR_INITIALIZATION_FAILED;
 
     struct driver_mode mode = driver_mode_of(physicalDevice);
-    if (!mode.translate) {
+    // 需要补报的扩展名（谎报 EXT divisor / 缺失的 push_descriptor），native 已有则跳过
+    const char* extra[2];
+    uint32_t extraCount = 0;
+    if (mode.divisor_liar) extra[extraCount++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
+    if (mode.push_desc_emulated) extra[extraCount++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+    if (extraCount == 0) {
         return real.enumerate_device_extension_properties(physicalDevice, NULL, pPropertyCount, pProperties);
     }
 
@@ -318,8 +375,12 @@ static VkResult shim_enumerate_device_extension_properties(VkPhysicalDevice phys
         }
     }
 
-    bool native = extension_list_contains(realList, realCount, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
-    uint32_t total = native ? realCount : realCount + 1;
+    const char* toAdd[2];
+    uint32_t addable = 0;
+    for (uint32_t i = 0; i < extraCount; i++) {
+        if (!extension_list_contains(realList, realCount, extra[i])) toAdd[addable++] = extra[i];
+    }
+    uint32_t total = realCount + addable;
 
     if (pProperties == NULL) {
         *pPropertyCount = total;
@@ -330,10 +391,11 @@ static VkResult shim_enumerate_device_extension_properties(VkPhysicalDevice phys
     uint32_t limit = *pPropertyCount < total ? *pPropertyCount : total;
     uint32_t fromReal = limit < realCount ? limit : realCount;
     if (fromReal > 0) memcpy(pProperties, realList, fromReal * sizeof(VkExtensionProperties));
-    if (!native && limit > fromReal) {
-        VkExtensionProperties* entry = &pProperties[fromReal];
-        strcpy(entry->extensionName, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
-        entry->specVersion = EXT_SPEC_VERSION;
+    for (uint32_t i = 0; i < addable && fromReal + i < limit; i++) {
+        VkExtensionProperties* entry = &pProperties[fromReal + i];
+        strcpy(entry->extensionName, toAdd[i]);
+        entry->specVersion = strcmp(toAdd[i], VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) == 0
+                ? EXT_SPEC_VERSION : 1;
     }
     *pPropertyCount = limit;
     free(realList);
@@ -344,6 +406,23 @@ static void translate_properties2(VkPhysicalDevice physicalDevice, VkPhysicalDev
                                   PFN_vkGetPhysicalDeviceProperties2 realFn) {
     ensure_instance_procs(physicalDevice);
     struct driver_mode mode = driver_mode_of(physicalDevice);
+    if (mode.divisor_liar && pProperties != NULL) {
+        // 驱动不认识 EXT divisor properties 结构（原样留零），按谎报语义回填合理上限；
+        // MC 仅需 maxVertexAttribDivisor 覆盖其实际使用的 divisor 值（1）
+        realFn(physicalDevice, pProperties);
+        void** liarLink = &pProperties->pNext;
+        while (*liarLink != NULL) {
+            struct chain_node* liarNode = *liarLink;
+            if (liarNode->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT) {
+                VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT* liarExt =
+                        (VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT*) liarNode;
+                liarExt->maxVertexAttribDivisor = 0xFFFFFFFFu;
+                break;
+            }
+            liarLink = &liarNode->pNext;
+        }
+        return;
+    }
     if (!mode.translate || pProperties == NULL) {
         realFn(physicalDevice, pProperties);
         return;
@@ -406,24 +485,122 @@ static bool device_fns_emulated(VkDevice device) {
     return false;
 }
 
+// ---------- VK_KHR_push_descriptor 模拟状态 ----------
+#define MAX_PUSH_DEVICES 8
+#define MAX_PUSH_LAYOUTS 64
+#define MAX_PUSH_SHADOWS 256
+#define MAX_PUSH_SETS_PER_LAYOUT 16
+
+// 推送描述符的影子集合：应用 push 后立即以常规描述符更新+绑定等价替换，
+// 管线侧的 push 标志已在创建时剥除，驱动按普通描述符集读取
+struct push_layout_entry {
+    VkPipelineLayout layout;
+    VkDevice device;
+    uint32_t setCount;
+    VkDescriptorSetLayout setLayouts[MAX_PUSH_SETS_PER_LAYOUT];
+};
+struct push_shadow_entry {
+    VkPipelineLayout layout;
+    uint32_t set;
+    VkDescriptorSet shadow;
+};
+
+static pthread_mutex_t g_push_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkDevice g_push_devices[MAX_PUSH_DEVICES];
+static int g_push_device_count;
+static VkDescriptorPool g_push_pools[MAX_PUSH_DEVICES];
+static struct push_layout_entry g_push_layouts[MAX_PUSH_LAYOUTS];
+static int g_push_layout_count;
+static struct push_shadow_entry g_push_shadows[MAX_PUSH_SHADOWS];
+static int g_push_shadow_count;
+
+static void register_device_push_emulation(VkDevice device) {
+    pthread_mutex_lock(&g_push_lock);
+    bool registered = false;
+    for (int i = 0; i < g_push_device_count; i++) {
+        if (g_push_devices[i] == device) registered = true;
+    }
+    if (!registered && g_push_device_count < MAX_PUSH_DEVICES) {
+        g_push_devices[g_push_device_count++] = device;
+    }
+    pthread_mutex_unlock(&g_push_lock);
+}
+
+static bool device_push_emulated(VkDevice device) {
+    pthread_mutex_lock(&g_push_lock);
+    for (int i = 0; i < g_push_device_count; i++) {
+        if (g_push_devices[i] == device) {
+            pthread_mutex_unlock(&g_push_lock);
+            return true;
+        }
+    }
+    pthread_mutex_unlock(&g_push_lock);
+    return false;
+}
+
+// 取设备的影子描述符池（惰性创建）。调用方持有 g_push_lock
+static VkDescriptorPool push_pool_for_device_locked(VkDevice device) {
+    int idx = -1;
+    for (int i = 0; i < g_push_device_count; i++) {
+        if (g_push_devices[i] == device) { idx = i; break; }
+    }
+    if (idx < 0) return VK_NULL_HANDLE;
+    if (g_push_pools[idx] != VK_NULL_HANDLE) return g_push_pools[idx];
+    if (real.create_descriptor_pool == NULL) return VK_NULL_HANDLE;
+
+    VkDescriptorPoolSize sizes[] = {
+            {VK_DESCRIPTOR_TYPE_SAMPLER, 4096},
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384},
+            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8192},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 4096},
+            {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 4096},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8192},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2048},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 2048},
+            {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 2048},
+    };
+    VkDescriptorPoolCreateInfo ci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    ci.flags = 0;
+    ci.maxSets = 8192;
+    ci.poolSizeCount = (uint32_t) (sizeof(sizes) / sizeof(sizes[0]));
+    ci.pPoolSizes = sizes;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (real.create_descriptor_pool(device, &ci, NULL, &pool) != VK_SUCCESS) {
+        FCL_LOG("vkshim: push emulation pool create failed");
+        return VK_NULL_HANDLE;
+    }
+    g_push_pools[idx] = pool;
+    return pool;
+}
+
 static VkResult shim_create_device(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* pCreateInfo,
                                    const VkAllocationCallbacks* pAllocator, VkDevice* pDevice) {
     ensure_instance_procs(physicalDevice);
     struct driver_mode mode = driver_mode_of(physicalDevice);
-    if (!mode.translate && !mode.fns_emulated) {
+    if (!mode.translate && !mode.fns_emulated && !mode.divisor_liar && !mode.push_desc_emulated) {
         return real.create_device(physicalDevice, pCreateInfo, pAllocator, pDevice);
     }
 
     bool extEnabled = false;
     bool khrEnabled = false;
+    bool pushEnabled = false;
     for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
         const char* name = pCreateInfo->ppEnabledExtensionNames[i];
         if (strcmp(name, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) == 0) {
             extEnabled = true;
         } else if (strcmp(name, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) == 0) {
             khrEnabled = true;
+        } else if (strcmp(name, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) == 0) {
+            pushEnabled = true;
         }
     }
+    // 谎报扩展必须从启用名单剥除：驱动没有该扩展名时设备创建直接报
+    // VK_ERROR_EXTENSION_NOT_PRESENT（fillModeNonSolid 同理在下方剥位）
+    bool stripDivisor = extEnabled && (mode.translate || mode.divisor_liar);
+    bool stripPush = pushEnabled && mode.push_desc_emulated;
+    bool addKhr = mode.translate && mode.add_khr && extEnabled && !khrEnabled;
 
     // fillModeNonSolid 模拟：应用因谎报而在启用列表中带上该能力位，真驱动会拒绝
     // 设备创建，须以副本剥除（pEnabledFeatures 可能与 pNext 链内 Features2 别名，
@@ -455,21 +632,30 @@ static VkResult shim_create_device(VkPhysicalDevice physicalDevice, const VkDevi
     }
 
     VkResult result;
-    if (mode.translate && extEnabled) {
-        const char** names = malloc((pCreateInfo->enabledExtensionCount + 1) * sizeof(char*));
-        if (names == NULL) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    bool needPatch = stripDivisor || stripPush || addKhr || featuresCopied || (mode.translate && extEnabled);
+    if (needPatch) {
+        const char** names = NULL;
         uint32_t count = 0;
-        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
-            const char* name = pCreateInfo->ppEnabledExtensionNames[i];
-            if (strcmp(name, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) != 0) names[count++] = name;
+        if (stripDivisor || stripPush || addKhr) {
+            names = malloc((pCreateInfo->enabledExtensionCount + 1) * sizeof(char*));
+            if (names == NULL) return VK_ERROR_OUT_OF_HOST_MEMORY;
+            for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
+                const char* name = pCreateInfo->ppEnabledExtensionNames[i];
+                if (stripDivisor && strcmp(name, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) == 0) continue;
+                if (stripPush && strcmp(name, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) == 0) continue;
+                names[count++] = name;
+            }
+            if (addKhr) names[count++] = VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
         }
-        if (mode.add_khr && !khrEnabled) names[count++] = VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
 
         VkDeviceCreateInfo patched = *pCreateInfo;
         if (featuresCopied) patched.pEnabledFeatures = &patchedFeatures;
-        patched.ppEnabledExtensionNames = names;
-        patched.enabledExtensionCount = count;
+        if (names != NULL) {
+            patched.ppEnabledExtensionNames = names;
+            patched.enabledExtensionCount = count;
+        }
 
+if (mode.translate && extEnabled) {
         // EXT v1/v2 语义下 divisor 无需显式启用，而 KHR/核心要求 features 结构置位。
         // 两个特性位以驱动报告值为准：应用未提供节点时按查询结果补写，
         // 自带节点时把驱动不支持的位临时置回 VK_FALSE，调用后恢复
@@ -502,6 +688,10 @@ static VkResult shim_create_device(VkPhysicalDevice physicalDevice, const VkDevi
         if (restore != NULL) *restore = NULL;
         if (appDivisorOriginal) appFeatures->vertexAttributeInstanceRateDivisor = VK_TRUE;
         if (appZeroDivisorOriginal) appFeatures->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
+        } else {
+            // 非 translate 形态不做特性注入，直接以已剥名单的副本创建
+            result = real.create_device(physicalDevice, &patched, pAllocator, pDevice);
+        }
         free(names);
     } else {
         VkDeviceCreateInfo patched = *pCreateInfo;
@@ -517,6 +707,7 @@ static VkResult shim_create_device(VkPhysicalDevice physicalDevice, const VkDevi
 
     if (result == VK_SUCCESS && pDevice != NULL) {
         register_device_fns_emulation(*pDevice, mode.fns_emulated);
+        if (mode.push_desc_emulated) register_device_push_emulation(*pDevice);
     }
     return result;
 }
@@ -603,6 +794,14 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
             return (PFN_vkVoidFunction) &shim_create_device;
         } else if (strcmp(pName, "vkCreateGraphicsPipelines") == 0) {
             return (PFN_vkVoidFunction) &shim_create_graphics_pipelines;
+        } else if (strcmp(pName, "vkCreateComputePipelines") == 0) {
+            return (PFN_vkVoidFunction) &shim_create_compute_pipelines;
+        } else if (strcmp(pName, "vkCreateDescriptorSetLayout") == 0) {
+            return (PFN_vkVoidFunction) &shim_create_descriptor_set_layout;
+        } else if (strcmp(pName, "vkCreatePipelineLayout") == 0) {
+            return (PFN_vkVoidFunction) &shim_create_pipeline_layout;
+        } else if (strcmp(pName, "vkCmdPushDescriptorSetKHR") == 0) {
+            return (PFN_vkVoidFunction) &shim_cmd_push_descriptor_set;
         }
     }
     return real_get_instance_proc_addr(instance, pName);
@@ -612,6 +811,18 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, co
     if (!g_ready || device == NULL || pName == NULL) return NULL;
     if (strcmp(pName, "vkCreateGraphicsPipelines") == 0) {
         return (PFN_vkVoidFunction) &shim_create_graphics_pipelines;
+    }
+    if (strcmp(pName, "vkCreateComputePipelines") == 0) {
+        return (PFN_vkVoidFunction) &shim_create_compute_pipelines;
+    }
+    if (strcmp(pName, "vkCreateDescriptorSetLayout") == 0) {
+        return (PFN_vkVoidFunction) &shim_create_descriptor_set_layout;
+    }
+    if (strcmp(pName, "vkCreatePipelineLayout") == 0) {
+        return (PFN_vkVoidFunction) &shim_create_pipeline_layout;
+    }
+    if (strcmp(pName, "vkCmdPushDescriptorSetKHR") == 0) {
+        return (PFN_vkVoidFunction) &shim_cmd_push_descriptor_set;
     }
     return real_get_device_proc_addr(device, pName);
 }
@@ -656,46 +867,72 @@ static void shim_get_physical_device_features(VkPhysicalDevice physicalDevice, V
     }
 }
 
+// features2 链上补写谎报的 divisor 特性位（EXT/KHR sType 同值，按 sType 匹配）
+static void patch_liar_divisor_features(VkPhysicalDeviceFeatures2* pFeatures, struct driver_mode mode) {
+    if (!mode.divisor_liar || pFeatures == NULL) return;
+    struct chain_node* node = (struct chain_node*) pFeatures->pNext;
+    while (node != NULL) {
+        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR) {
+            VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR* f =
+                    (VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR*) node;
+            f->vertexAttributeInstanceRateDivisor = mode.divisor_feature ? VK_TRUE : VK_FALSE;
+            f->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
+            break;
+        }
+        node = (struct chain_node*) node->pNext;
+    }
+}
+
 static void shim_get_physical_device_features2(VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures2* pFeatures) {
     if (real.get_physical_device_features2 == NULL || pFeatures == NULL) return;
     real.get_physical_device_features2(physicalDevice, pFeatures);
-    if (driver_mode_of(physicalDevice).fns_emulated) {
+    struct driver_mode mode = driver_mode_of(physicalDevice);
+    if (mode.fns_emulated) {
         pFeatures->features.fillModeNonSolid = VK_TRUE;
     }
+    patch_liar_divisor_features(pFeatures, mode);
 }
 
 static void shim_get_physical_device_features2_khr(VkPhysicalDevice physicalDevice,
                                                    VkPhysicalDeviceFeatures2* pFeatures) {
     if (real.get_physical_device_features2 == NULL || pFeatures == NULL) return;
     real.get_physical_device_features2(physicalDevice, pFeatures);
-    if (driver_mode_of(physicalDevice).fns_emulated) {
+    struct driver_mode mode = driver_mode_of(physicalDevice);
+    if (mode.fns_emulated) {
         pFeatures->features.fillModeNonSolid = VK_TRUE;
     }
+    patch_liar_divisor_features(pFeatures, mode);
 }
 
 // fillModeNonSolid 模拟的降级路径：线框/点填充管线统一改回 FILL，
-// 牺牲线框视觉换取可运行性；只对模拟设备生效，原生支持的设备早已直通
+// 牺牲线框视觉换取可运行性；push 模拟设备同时剥除管线的 push 标志
+// （驱动不支持 VK_KHR_push_descriptor 时带标志创建会失败）
 static VkResult shim_create_graphics_pipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
                                                const VkGraphicsPipelineCreateInfo* pCreateInfos,
                                                const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines) {
     if (real.create_graphics_pipelines == NULL) return VK_ERROR_INITIALIZATION_FAILED;
-    if (!device_fns_emulated(device) || pCreateInfos == NULL || createInfoCount == 0) {
+    ensure_instance_procs(device);
+    bool fnsEmu = device_fns_emulated(device);
+    bool pushEmu = device_push_emulated(device);
+    if ((!fnsEmu && !pushEmu) || pCreateInfos == NULL || createInfoCount == 0) {
         return real.create_graphics_pipelines(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
                                               pPipelines);
     }
 
-    // 仅在存在非 FILL 光栅化状态时才复制改写；pNext 浅拷贝在调用期间有效
+    // 仅在存在非 FILL 光栅化状态或需剥除 push 标志时才复制改写；pNext 浅拷贝在调用期间有效
     VkGraphicsPipelineCreateInfo* patched = NULL;
     VkPipelineRasterizationStateCreateInfo** replaced = NULL;
     uint32_t replacedCount = 0;
-    for (uint32_t i = 0; i < createInfoCount; i++) {
-        const VkPipelineRasterizationStateCreateInfo* raster = pCreateInfos[i].pRasterizationState;
-        if (raster != NULL && raster->polygonMode != VK_POLYGON_MODE_FILL) replacedCount++;
+    if (fnsEmu) {
+        for (uint32_t i = 0; i < createInfoCount; i++) {
+            const VkPipelineRasterizationStateCreateInfo* raster = pCreateInfos[i].pRasterizationState;
+            if (raster != NULL && raster->polygonMode != VK_POLYGON_MODE_FILL) replacedCount++;
+        }
     }
-    if (replacedCount > 0) {
+    if (replacedCount > 0 || pushEmu) {
         patched = malloc(createInfoCount * sizeof(VkGraphicsPipelineCreateInfo));
-        replaced = malloc(replacedCount * sizeof(VkPipelineRasterizationStateCreateInfo*));
-        if (patched == NULL || replaced == NULL) {
+        replaced = replacedCount > 0 ? malloc(replacedCount * sizeof(VkPipelineRasterizationStateCreateInfo*)) : NULL;
+        if (patched == NULL || (replacedCount > 0 && replaced == NULL)) {
             free(patched);
             free(replaced);
             return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -703,6 +940,8 @@ static VkResult shim_create_graphics_pipelines(VkDevice device, VkPipelineCache 
         memcpy(patched, pCreateInfos, createInfoCount * sizeof(VkGraphicsPipelineCreateInfo));
         uint32_t idx = 0;
         for (uint32_t i = 0; i < createInfoCount; i++) {
+            if (pushEmu) patched[i].flags &= ~VK_PIPELINE_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+            if (!fnsEmu) continue;
             const VkPipelineRasterizationStateCreateInfo* raster = patched[i].pRasterizationState;
             if (raster != NULL && raster->polygonMode != VK_POLYGON_MODE_FILL) {
                 VkPipelineRasterizationStateCreateInfo* mod =
@@ -726,4 +965,143 @@ static VkResult shim_create_graphics_pipelines(VkDevice device, VkPipelineCache 
         free(patched);
     }
     return result;
+}
+
+static VkResult shim_create_compute_pipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
+                                              const VkComputePipelineCreateInfo* pCreateInfos,
+                                              const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines) {
+    ensure_instance_procs(device);
+    if (real.create_compute_pipelines == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!device_push_emulated(device) || pCreateInfos == NULL || createInfoCount == 0) {
+        return real.create_compute_pipelines(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
+                                             pPipelines);
+    }
+    VkComputePipelineCreateInfo* patched = malloc(createInfoCount * sizeof(VkComputePipelineCreateInfo));
+    if (patched == NULL) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    memcpy(patched, pCreateInfos, createInfoCount * sizeof(VkComputePipelineCreateInfo));
+    for (uint32_t i = 0; i < createInfoCount; i++) {
+        patched[i].flags &= ~VK_PIPELINE_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    }
+    VkResult result = real.create_compute_pipelines(device, pipelineCache, createInfoCount, patched, pAllocator,
+                                                    pPipelines);
+    free(patched);
+    return result;
+}
+
+static VkResult shim_create_descriptor_set_layout(VkDevice device, const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+                                                  const VkAllocationCallbacks* pAllocator,
+                                                  VkDescriptorSetLayout* pSetLayout) {
+    ensure_instance_procs(device);
+    if (real.create_descriptor_set_layout == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!device_push_emulated(device) || pCreateInfo == NULL ||
+        (pCreateInfo->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) == 0) {
+        return real.create_descriptor_set_layout(device, pCreateInfo, pAllocator, pSetLayout);
+    }
+    // push 布局标志在无该扩展的驱动上属未定义位，剥除后按常规集合布局创建（内容不变）
+    VkDescriptorSetLayoutCreateInfo patched = *pCreateInfo;
+    patched.flags = pCreateInfo->flags & ~VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    return real.create_descriptor_set_layout(device, &patched, pAllocator, pSetLayout);
+}
+
+static VkResult shim_create_pipeline_layout(VkDevice device, const VkPipelineLayoutCreateInfo* pCreateInfo,
+                                            const VkAllocationCallbacks* pAllocator, VkPipelineLayout* pPipelineLayout) {
+    ensure_instance_procs(device);
+    if (real.create_pipeline_layout == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult result = real.create_pipeline_layout(device, pCreateInfo, pAllocator, pPipelineLayout);
+    if (result != VK_SUCCESS || pPipelineLayout == NULL || !device_push_emulated(device) || pCreateInfo == NULL) {
+        return result;
+    }
+    if (pCreateInfo->setLayoutCount > MAX_PUSH_SETS_PER_LAYOUT) {
+        FCL_LOG("vkshim: pipeline layout setCount %u exceeds push tracking limit, layout=%p",
+                pCreateInfo->setLayoutCount, (void*) *pPipelineLayout);
+        return result;
+    }
+    pthread_mutex_lock(&g_push_lock);
+    if (g_push_layout_count < MAX_PUSH_LAYOUTS) {
+        struct push_layout_entry* entry = &g_push_layouts[g_push_layout_count++];
+        entry->layout = *pPipelineLayout;
+        entry->device = device;
+        entry->setCount = pCreateInfo->setLayoutCount;
+        for (uint32_t i = 0; i < pCreateInfo->setLayoutCount; i++) {
+            entry->setLayouts[i] = pCreateInfo->pSetLayouts[i];
+        }
+    } else {
+        FCL_LOG("vkshim: push layout table full, tracking disabled (layout=%p)", (void*) *pPipelineLayout);
+    }
+    pthread_mutex_unlock(&g_push_lock);
+    return result;
+}
+
+// VK_KHR_push_descriptor 模拟：把 push 翻译为“更新影子集合 + 立即绑定”。
+// 管线创建时已剥除 push 标志，驱动按普通描述符集读取，语义与常规更新+绑定等价；
+// 线程：注册表操作在 g_push_lock 内完成，驱动调用同样持锁执行（游戏侧 push 单线程为主）
+static void shim_cmd_push_descriptor_set(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+                                         VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
+                                         const VkWriteDescriptorSet* pDescriptorWrites) {
+    ensure_instance_procs(commandBuffer);
+    // 查找布局登记（模拟设备专属）；未登记或未模拟 → 走原生直通
+    VkDevice device = VK_NULL_HANDLE;
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_push_lock);
+    for (int i = 0; i < g_push_layout_count; i++) {
+        if (g_push_layouts[i].layout == layout) {
+            device = g_push_layouts[i].device;
+            if (set < g_push_layouts[i].setCount) setLayout = g_push_layouts[i].setLayouts[set];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_push_lock);
+    if (device == VK_NULL_HANDLE || !device_push_emulated(device) || setLayout == VK_NULL_HANDLE) {
+        if (real.cmd_push_descriptor_set != NULL) {
+            real.cmd_push_descriptor_set(commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount,
+                                         pDescriptorWrites);
+        } else {
+            FCL_LOG("vkshim: push passthrough unavailable (layout=%p set=%u), dropped", (void*) layout, set);
+        }
+        return;
+    }
+
+    pthread_mutex_lock(&g_push_lock);
+    VkDescriptorSet shadow = VK_NULL_HANDLE;
+    for (int i = 0; i < g_push_shadow_count; i++) {
+        if (g_push_shadows[i].layout == layout && g_push_shadows[i].set == set) {
+            shadow = g_push_shadows[i].shadow;
+            break;
+        }
+    }
+    if (shadow == VK_NULL_HANDLE) {
+        VkDescriptorPool pool = push_pool_for_device_locked(device);
+        if (pool != VK_NULL_HANDLE && real.allocate_descriptor_sets != NULL) {
+            VkDescriptorSetAllocateInfo alloc = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            alloc.descriptorPool = pool;
+            alloc.descriptorSetCount = 1;
+            alloc.pSetLayouts = &setLayout;
+            if (real.allocate_descriptor_sets(device, &alloc, &shadow) != VK_SUCCESS) {
+                FCL_LOG("vkshim: shadow set alloc failed (layout=%p set=%u)", (void*) layout, set);
+                shadow = VK_NULL_HANDLE;
+            }
+        }
+        if (shadow != VK_NULL_HANDLE && g_push_shadow_count < MAX_PUSH_SHADOWS) {
+            g_push_shadows[g_push_shadow_count].layout = layout;
+            g_push_shadows[g_push_shadow_count].set = set;
+            g_push_shadows[g_push_shadow_count].shadow = shadow;
+            g_push_shadow_count++;
+        }
+    }
+
+    if (shadow != VK_NULL_HANDLE && real.update_descriptor_sets != NULL &&
+        real.cmd_bind_descriptor_sets != NULL && descriptorWriteCount > 0 && pDescriptorWrites != NULL) {
+        VkWriteDescriptorSet* writes = malloc(descriptorWriteCount * sizeof(VkWriteDescriptorSet));
+        if (writes != NULL) {
+            memcpy(writes, pDescriptorWrites, descriptorWriteCount * sizeof(VkWriteDescriptorSet));
+            for (uint32_t i = 0; i < descriptorWriteCount; i++) writes[i].dstSet = shadow;
+            real.update_descriptor_sets(device, descriptorWriteCount, writes, 0, NULL);
+            free(writes);
+            real.cmd_bind_descriptor_sets(commandBuffer, pipelineBindPoint, layout, set, 1, &shadow, 0, NULL);
+        }
+    } else if (shadow == VK_NULL_HANDLE) {
+        FCL_LOG("vkshim: push emulation degraded, descriptor may be stale (layout=%p set=%u)",
+                (void*) layout, set);
+    }
+    pthread_mutex_unlock(&g_push_lock);
 }
