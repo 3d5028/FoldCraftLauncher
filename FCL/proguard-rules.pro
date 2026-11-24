@@ -89,3 +89,9 @@
 # ---------- 总开关：允许 shrink + optimize，但禁止重命名 ----------
 # （防止外部插件/JNI/配置文件中的类与成员名失配；崩溃堆栈保持可读）
 -keepnames class * { *; }
+# ---------- JNI 按名回调的桥接类（第0点：正常运行优先） ----------
+# native JNI_OnLoad/回调按名 GetStaticMethodID/GetMethodID；这些方法无 Java 调用点，
+# R8 会当死代码删除 → NoSuchMethodError → JNI abort（游戏启动崩溃）。
+# 已审计 FCL/src/main/jni 全部 FindClass/GetMethodID 引用面后整包保留。
+-keep class com.tungsten.fclauncher.** { *; }
+-keep class com.mio.flite.** { *; }
