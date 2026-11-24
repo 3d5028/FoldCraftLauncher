@@ -105,14 +105,13 @@ android {
             signingConfig = signingConfigs.getByName("FCLDebugKey")
             // 与 FileProvider authority（${applicationId}.provider）保持一致（原 FCLLibrary 模块的 resValue）
             resValue("string", "file_browser_provider", "com.tungsten.fcl.debug.provider")
-            // 激进优化（perf/aggressive-optimization 分支，AI 辅助）：R8 代码收缩/混淆/优化 + 资源收缩
-            // keep 规则见 proguard-rules.pro，若运行异常可回退本分支（详见 README 声明）
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            // R8 已关闭（2026-11 性能/兼容取舍调研结论）：类合并与收缩会误伤 Gson 反射序列化面
+            // 与 JNI 按名回调（三例崩溃：AuthlibInjectorServer / FCLBridge.querySystemClipboard /
+            // ForgeNewInstallProfile），打地鼠式 keep 规则不可维护；R8 对运行时帧率无收益，
+            // 运行时性能改由 native -O3 + NDEBUG（src/main/jni/CMakeLists.txt）承担。
+            // 激进配置与 keep 规则保留在 proguard-rules.pro 供复现回溯。
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
         configureEach {
             resValue("string", "app_version", defaultConfig.versionName.toString())
