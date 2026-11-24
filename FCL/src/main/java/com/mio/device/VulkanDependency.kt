@@ -197,7 +197,7 @@ private fun vulkanDependency(name: String, block: VulkanDependencyBuilder.() -> 
  */
 object VulkanRequirements {
     /** 当前 Vulkan 检测器版本，依赖表调整时递增以使旧缓存失效 */
-    const val VULKAN_REQUIREMENTS_VERSION = 1
+    const val VULKAN_REQUIREMENTS_VERSION = 2
 
     /** 首个提供 Vulkan 后端的 Minecraft 版本 */
     const val MIN_MC_VERSION = "26.2"

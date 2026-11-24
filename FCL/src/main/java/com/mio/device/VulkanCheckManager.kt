@@ -32,6 +32,8 @@ data class VulkanCheckRecord(
     val needsDivisorShim: Boolean = false,
     /** 设备核心能力位 fillModeNonSolid 缺失，可经 vkshim 降级模拟（线框渲染退化为实心） */
     val needsFillModeEmulation: Boolean = false,
+    /** 设备缺 VK_KHR_push_descriptor，可经 vkshim 以影子集合模拟 */
+    val needsPushDescriptorShim: Boolean = false,
     /** 设备可支持的 Minecraft 版本范围，[Range.until] 为排他上界，null 表示无上界 */
     val supportedRanges: List<Range> = emptyList(),
     val version: Int = 0,
@@ -69,6 +71,7 @@ object VulkanCheckManager {
 
     private const val EXT_VERTEX_ATTRIBUTE_DIVISOR = "VK_EXT_vertex_attribute_divisor"
     private const val KHR_VERTEX_ATTRIBUTE_DIVISOR = "VK_KHR_vertex_attribute_divisor"
+    private const val KHR_PUSH_DESCRIPTOR = "VK_KHR_push_descriptor"
     private const val FEATURE_FILL_MODE_NON_SOLID = "fillModeNonSolid"
 
     /**
@@ -100,19 +103,25 @@ object VulkanCheckManager {
                 val capabilities = VulkanChecker.checkCapabilities(useCustomDriver, driver, cacheDir)
                 // shim 仅包装系统 Vulkan 加载器：请求自定义驱动但加载失败回落系统加载器时，
                 // 检测与游戏运行时实际使用的都是系统驱动，shim 同样适用
+                // divisor 合成：驱动缺 EXT（有 KHR 走合成，两者皆无走谎报，见 vkshim.c）
                 val needsDivisorShim = capabilities != null && !capabilities.usedCustomDriver &&
-                        EXT_VERTEX_ATTRIBUTE_DIVISOR !in capabilities.extensions &&
-                        KHR_VERTEX_ATTRIBUTE_DIVISOR in capabilities.extensions
+                        EXT_VERTEX_ATTRIBUTE_DIVISOR !in capabilities.extensions
                 val needsFillModeEmulation = capabilities != null && !capabilities.usedCustomDriver &&
                         capabilities.features[FEATURE_FILL_MODE_NON_SOLID] != true
-                needsVulkanShim = needsDivisorShim || needsFillModeEmulation
+                // push_descriptor 由 vkshim 以影子集合模拟（更新+立即绑定），支撑 26.3 OIT 管线
+                val needsPushDescriptorShim = capabilities != null && !capabilities.usedCustomDriver &&
+                        KHR_PUSH_DESCRIPTOR !in capabilities.extensions
+                needsVulkanShim = needsDivisorShim || needsFillModeEmulation || needsPushDescriptorShim
                 // shim 生效后游戏可见的能力按补齐后的状态评估：
-                // divisor 由 KHR 合成补报；fillModeNonSolid 由降级模拟保证管线可创建
+                // divisor 由 EXT 补报/KHR 合成；fillModeNonSolid 由降级模拟保证管线可创建；
+                // push_descriptor 由影子集合模拟
                 val effective = capabilities?.let {
                     it.copy(
-                        extensions = if (needsDivisorShim) {
-                            it.extensions + EXT_VERTEX_ATTRIBUTE_DIVISOR
-                        } else it.extensions,
+                        extensions = buildList {
+                            addAll(it.extensions)
+                            if (needsDivisorShim) add(EXT_VERTEX_ATTRIBUTE_DIVISOR)
+                            if (needsPushDescriptorShim) add(KHR_PUSH_DESCRIPTOR)
+                        },
                         features = if (needsFillModeEmulation) {
                             it.features + (FEATURE_FILL_MODE_NON_SOLID to true)
                         } else it.features
@@ -127,6 +136,7 @@ object VulkanCheckManager {
                         apiVersion = effective?.versionString.orEmpty(),
                         needsDivisorShim = needsDivisorShim,
                         needsFillModeEmulation = needsFillModeEmulation,
+                        needsPushDescriptorShim = needsPushDescriptorShim,
                         supportedRanges = effective?.profileSupport()
                             ?.filter { it.supported }
                             ?.map { VulkanCheckRecord.Range(since = it.since, until = it.until) }
@@ -157,7 +167,7 @@ object VulkanCheckManager {
             needsVulkanShim = false
             return VulkanEnsureResult.NEED_CHECK
         }
-        needsVulkanShim = record.needsDivisorShim || record.needsFillModeEmulation
+        needsVulkanShim = record.needsDivisorShim || record.needsFillModeEmulation || record.needsPushDescriptorShim
         return if (record.isSupported(mcVersion)) VulkanEnsureResult.SUPPORTED else VulkanEnsureResult.UNSUPPORTED
     }
 
