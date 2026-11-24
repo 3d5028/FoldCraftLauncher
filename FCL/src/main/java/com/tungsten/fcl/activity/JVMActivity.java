@@ -3,7 +3,6 @@ package com.tungsten.fcl.activity;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
-import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
@@ -130,14 +129,15 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            // 键盘真实显隐轮询上报 SDL 输入通道，维持 SdlImeController 缓存标志与实际一致
+            // （标志漂移表现为开关键盘需点两次）；上报不受「禁用软键盘自适应」影响
+            int imeHeight = AndroidUtilKt.getImeOccludedHeight(getWindow().getDecorView());
+            SDLActivity.notifyImeVisibilityChanged(imeHeight > 0);
             if (menuType == MenuType.GAME && ((GameMenu) menu).getMenuSetting().isDisableSoftKeyAdjust()) {
                 return;
             }
-            int screenHeight = getWindow().getDecorView().getHeight();
-            Rect rect = new Rect();
-            getWindow().getDecorView().getWindowVisibleDisplayFrame(rect);
-            if (screenHeight * 2 / 3 > rect.bottom) {
-                textureView.setTranslationY(rect.bottom - screenHeight);
+            if (imeHeight > 0) {
+                textureView.setTranslationY(-imeHeight);
                 isTranslated = true;
             } else if (isTranslated) {
                 isTranslated = false;
@@ -376,6 +376,9 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
 
     @Override
     public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surfaceTexture) {
+        if (menuType == MenuType.GAME) {
+            ((GameMenu) menu).captureMagnifierFrame();
+        }
         if (output == 1) {
             menu.onGraphicOutput();
             output++;
@@ -502,6 +505,7 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, hasFocus ? 1 : 0);
+        notifySdlWindowFocus(hasFocus);
         if (menu == null || menuType != MenuType.GAME) {
             return;
         }
@@ -511,6 +515,24 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
             menu.getInput().resetExternalMouseState();
         } else {
             menu.getInput().ensurePointerCapture();
+        }
+    }
+
+    /**
+     * 窗口焦点转交 SDL：本活动不继承 SDLActivity，SDL 窗口的焦点事件只能在此转达，
+     * 否则失焦清理输入的实现不会生效——例如 Cleanroom 的 SDL 窗口在失焦时释放仍按下的按键与鼠标键，
+     * 并把失焦状态反馈给 LWJGL 2 兼容层的 Display.isActive()，
+     * 参考 Window 的焦点处理
+     * （https://github.com/CleanroomMC/Cleanroom/blob/0.7.14-alpha/module/cleanroom/src/main/java/com/cleanroommc/client/sdl/Window.java）
+     */
+    private void notifySdlWindowFocus(boolean hasFocus) {
+        if (!SdlBridge.getSdlEnabled()) {
+            return;
+        }
+        try {
+            SDLActivity.nativeFocusChanged(hasFocus);
+        } catch (Throwable throwable) {
+            Logging.LOG.log(Level.WARNING, "Failed to forward window focus to SDL", throwable);
         }
     }
 

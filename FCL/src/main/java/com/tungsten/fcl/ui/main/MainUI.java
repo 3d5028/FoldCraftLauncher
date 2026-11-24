@@ -8,7 +8,6 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.widget.LinearLayoutCompat;
 
 import com.mio.skin.AnimationDialog;
-import com.mio.skin.SkinAnimations;
 import com.mio.skin.SkinRenderer;
 import com.mio.skin.SkinTextureLoader;
 import com.mio.skin.SkinViewer;
@@ -45,7 +44,8 @@ public class MainUI extends FCLCommonUI implements View.OnClickListener {
     private FCLButton hide;
     private Announcement announcement = null;
 
-    private SkinViewer skinViewer;
+    /** 皮肤模型预览视图（public 供引导遮罩以它为高亮目标） */
+    public SkinViewer skinViewer;
     private SkinRenderer renderer;
     private SkinTextureLoader skinLoader;
 
@@ -76,18 +76,15 @@ public class MainUI extends FCLCommonUI implements View.OnClickListener {
         skinLoader.load(Accounts.getSelectedAccount(), false);
         // 恢复上次选择的动画与 3D 皮肤层开关
         restoreSkinSettings(getContext(), renderer);
-        // 双击模型弹出皮肤模型设置窗口
-        skinViewer.setOnDoubleClick(() -> {
+        // 双指点击模型弹出皮肤模型设置窗口
+        skinViewer.setOnTwoFingerTap(() -> {
             Context context = getContext();
             if (context instanceof Activity && !((Activity) context).isDestroyed() && !((Activity) context).isFinishing()) {
-                new AnimationDialog(context, renderer.getAnimationId(), renderer.getSolidLayerEnabled(), renderer.getUpperBodySeparated(), clipId -> {
-                    renderer.playAnimation(clipId);
+                new AnimationDialog(context, renderer.getAnimation(), renderer.getOverlayEnabled(), animation -> {
+                    renderer.playAnimation(animation);
                     saveSkinSettings(context, renderer);
                 }, enabled -> {
-                    renderer.setSolidLayerEnabled(enabled);
-                    saveSkinSettings(context, renderer);
-                }, separated -> {
-                    renderer.setUpperBodySeparated(separated);
+                    renderer.setOverlayEnabled(enabled);
                     saveSkinSettings(context, renderer);
                 }).show();
             }

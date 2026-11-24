@@ -4,9 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Drawable
 import android.view.View
-import com.bumptech.glide.Glide
-import com.bumptech.glide.request.target.CustomViewTarget
-import com.bumptech.glide.request.transition.Transition
 import java.io.File
 import java.util.Optional
 
@@ -36,23 +33,10 @@ class ImageUtil {
 
         @JvmStatic
         fun loadInto(view: View, drawable: Drawable) {
-            Glide.with(view).load(drawable).centerCrop()
-                .into(object : CustomViewTarget<View, Drawable>(view) {
-                    override fun onResourceCleared(placeholder: Drawable?) {
-                    }
-
-                    override fun onLoadFailed(errorDrawable: Drawable?) {
-                    }
-
-                    override fun onResourceReady(
-                        resource: Drawable,
-                        transition: Transition<in Drawable>?
-                    ) {
-                        view.background = resource
-                    }
-
-                })
-
+            // 派生独立实例：多个视图共享同一 Drawable 实例时 setBounds 会互相覆盖
+            // （共享的底层 bitmap 数据只读，不受影响）
+            val source = drawable.constantState?.newDrawable() ?: drawable
+            view.background = CenterCropDrawable(source)
         }
     }
 }

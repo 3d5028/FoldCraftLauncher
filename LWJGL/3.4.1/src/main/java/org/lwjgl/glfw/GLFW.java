@@ -24,6 +24,7 @@ import static org.lwjgl.system.JNI.*;
 import static org.lwjgl.system.MemoryStack.*;
 import static org.lwjgl.system.MemoryUtil.*;
 import java.util.*;
+import java.util.concurrent.locks.LockSupport;
 
 public class GLFW
 {
@@ -1001,6 +1002,13 @@ public class GLFW
     }
 
     public static void glfwSetWindowMonitor(@NativeType("GLFWwindow *") long window, @NativeType("GLFWmonitor *") long monitor, int xpos, int ypos, int width, int height, int refreshRate) {
+        // LWJGLXX 的全屏/无边框退出分支会把未初始化的 savedW/savedH（0）原样传回，
+        // 若照单全收窗口会塌缩成 0×0（Actinium 在标题界面同步窗口模式时触发）。
+        // 非正尺寸不是任何调用方的合法意图，直接丢弃整个调用，监视器状态保持不变。
+        if (width <= 0 || height <= 0) {
+            System.out.println("GLFW: Blocked invalid monitor size for window " + window + ", width=" + width + ", height=" + height);
+            return;
+        }
         // weird calculation to fake pointer
         mGLFWWindowMonitor = window * monitor;
     }
@@ -1253,6 +1261,11 @@ public class GLFW
     }
 
     public static void glfwSetWindowSize(long window, int width, int height) {
+        // 同 glfwSetWindowMonitor：非正尺寸来自 LWJGLXX 未初始化的恢复分支，丢弃以保住窗口尺寸
+        if (width <= 0 || height <= 0) {
+            System.out.println("GLFW: Blocked invalid size for window " + window + ", width=" + width + ", height=" + height);
+            return;
+        }
         internalGetWindow(window).width = width;
         internalGetWindow(window).height = height;
 
@@ -1350,16 +1363,22 @@ public class GLFW
     public static void glfwWaitEvents() {}
 
     public static void glfwWaitEventsTimeout(double timeout) {
-        // Boardwalk: this isn't how you do a frame limiter, but oh well
-        // System.out.println("Frame limiter");
-    /*
-        try {
-            Thread.sleep((long)(timeout * 1000));
-        } catch (InterruptedException ie) {
+        // 限帧等待：睡到截止时间前，末尾自旋吸收调度唤醒延迟（Minecraft 的 RenderSystem.limitDisplayFPS 循环调用）。
+        // 自旋余量需覆盖线程从 park 唤醒到实际被调度的延迟；剩余时间不足自旋余量时不再 park。
+        // 低帧率等待时间长，较短的自旋余量即可兜住唤醒延迟；高帧率等待短，需要更大余量。
+        // 保持原空实现不处理事件的行为，事件仍由主循环的 glfwPollEvents 处理。
+        if (timeout > 0.0 && !Double.isInfinite(timeout)) {
+            long nanos = (long) (timeout * 1_000_000_000.0);
+            long spinNanos = nanos > 3_000_000L ? 1_500_000L : 2_000_000L;
+            long deadline = System.nanoTime() + nanos;
+            long remaining;
+            while ((remaining = deadline - System.nanoTime()) > spinNanos) {
+                LockSupport.parkNanos(remaining - spinNanos);
+            }
+            while (System.nanoTime() < deadline) {
+                // 自旋等待，保证退出时刻精度
+            }
         }
-    */
-        // System.out.println("Out of the frame limiter");
-
     }
 
     public static void glfwPostEmptyEvent() {}

@@ -592,7 +592,6 @@
     <string name="modpack_type_mcbbs_export">می تواند توسط FCL، HMCL و MultiMC وارد شود</string>
     <string name="modpack_type_modrinth">Modrinth</string>
     <string name="modpack_type_multimc">MultiMC</string>
-    <string name="modpack_type_multimc_export">می تواند توسط FCL، HMCL و MultiMC وارد شود</string>
     <string name="modpack_type_server">بروزرسانی خودکار مادپک از سرور</string>
     <string name="modpack_type_server_export">به مالک سرور اجازه می دهد تا نمونه بازی را از راه دور بروزرسانی کند</string>
     <string name="modpack_type_server_malformed">مانیفست مادپک نامعتبر است، لطفا برای رفع این مشکل به سازنده مادپک سرور مراجعه کنید.</string>
@@ -725,7 +724,6 @@
     <string name="settings_fcl_controller">کنترلر</string>
     <string name="settings_fcl_renderer">پیاده‌سازی OpenGL (رندر)</string>
     <string name="settings_fcl_renderer_vgpu">VGPU (OpenGL 2.1+، فقط از نسخه های ۱.۱۷ به بعد پشتیبانی می کند)</string>
-    <string name="settings_fcl_renderer_freedreno">Freedreno (OpenGL 4.6، فقط از پردازنده های گرافیکی a616-a660 پشتیبانی می کند)</string>
     <string name="settings_download_netdisk">Netdisk (برای کاربران در چین توصیه می‌شود)</string>
     <string name="settings_game">تنظیمات بازی</string>
     <string name="settings_game_dimension">رزولوشن</string>
@@ -910,7 +908,4 @@
     <string name="renderer_source">منبع:</string>
     <string name="renderer_source_builtin">داخلی</string>
     <string name="animation_idle">بی‌حرکت</string>
-    <string name="animation_idle_variant_1">بی‌حرکت 1</string>
-    <string name="animation_idle_variant_2">بی‌حرکت 2</string>
-    <string name="animation_idle_variant_3">بی‌حرکت 3</string>
 </resources>

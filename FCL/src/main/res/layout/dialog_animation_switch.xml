@@ -51,10 +51,10 @@
         </androidx.appcompat.widget.LinearLayoutCompat>
 
         <androidx.appcompat.widget.LinearLayoutCompat
-            android:id="@+id/body_separation_row"
+            android:id="@+id/tap_sound_row"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
+            android:layout_marginTop="12dp"
             android:clickable="true"
             android:focusable="true"
             android:gravity="center_vertical"
@@ -69,12 +69,12 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:singleLine="true"
-                android:text="@string/skin_body_separation"
+                android:text="@string/skin_tap_sound"
                 android:textSize="16sp"
                 android:textStyle="bold" />
 
             <com.tungsten.fcllibrary.component.view.FCLSwitch
-                android:id="@+id/body_separation_switch"
+                android:id="@+id/tap_sound_switch"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp" />

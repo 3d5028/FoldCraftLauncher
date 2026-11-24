@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.drawable.GradientDrawable;
@@ -12,6 +13,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -131,10 +133,19 @@ public class ControlButton extends AppCompatButton implements CustomView {
         return dataProperty.get();
     }
 
+    /** 置空 outline：按键悬浮在游戏画面上不投影阴影，elevation 仍决定按键堆叠 z 序 */
+    private static final ViewOutlineProvider NO_SHADOW_OUTLINE = new ViewOutlineProvider() {
+        @Override
+        public void getOutline(@NonNull View view, @NonNull Outline outline) {
+            outline.setEmpty();
+        }
+    };
+
     public ControlButton(@NonNull Context context, GameMenu gameMenu, ViewListener listener) {
         super(context);
         this.menu = gameMenu;
         setElevation(113.0f);
+        setOutlineProvider(NO_SHADOW_OUTLINE);
 
         setStateListAnimator(null);
 
@@ -356,7 +367,9 @@ public class ControlButton extends AppCompatButton implements CustomView {
     @SuppressLint("ClickableViewAccessibility")
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        if (ghost) {
+        // 参考组控件在编辑模式下同样可选中/拖动/编辑（改动写入其归属组）；
+        // 游戏模式或跨组编辑关闭时仅作参照，不响应触摸
+        if (ghost && !(menu.isEditMode() && menu.isCrossGroupEditEnabled())) {
             return true;
         }
         if (menu.isEditMode()) {
@@ -442,6 +455,8 @@ public class ControlButton extends AppCompatButton implements CustomView {
                             menu.getViewManager().selectView(this);
                         }
                     } else {
+                        // 写回前记录撤销点：此刻数据仍是拖动前状态
+                        menu.getViewManager().recordForUndo(getData());
                         getData().getBaseInfo().setXPosition(Math.round((1000 * getX()) / (screenWidth - getMeasuredWidth())));
                         getData().getBaseInfo().setYPosition(Math.round((1000 * getY()) / (screenHeight - getMeasuredHeight())));
                         menu.getViewManager().saveController();
@@ -562,6 +577,8 @@ public class ControlButton extends AppCompatButton implements CustomView {
 
     /** 缩放结束：把最终像素尺寸与当前位置写回数据（百分比保持各自参考轴，[1,1000]；绝对为 dp），并刷新视图 */
     private void writeBackResizeSize() {
+        // 写回前记录撤销点：此刻数据仍是缩放前状态
+        menu.getViewManager().recordForUndo(getData());
         BaseInfoData baseInfo = getData().getBaseInfo();
         int width = getWidth();
         int height = getHeight();
@@ -838,10 +855,32 @@ public class ControlButton extends AppCompatButton implements CustomView {
         if (StringUtils.isNotBlank(event.getOutputText())) {
             GameTextSender.send(menu, event.getOutputText());
         }
-        for (String id : event.bindViewGroupList()) {
-            if (menu.getController().viewGroups().stream().anyMatch(it -> it.getId().equals(id))) {
-                ControlViewGroup viewGroup = menu.getController().viewGroups().stream().filter(it -> it.getId().equals(id)).findFirst().orElse(null);
-                menu.getViewManager().switchViewGroupVisibility(viewGroup);
+        for (String bind : event.bindViewGroupList()) {
+            // 绑定格式：groupId（按下切换显隐）或 groupId:show / groupId:hide（按下强制为指定状态）
+            String groupId = bind;
+            String mode = "";
+            int separator = bind.indexOf(':');
+            if (separator >= 0) {
+                groupId = bind.substring(0, separator);
+                mode = bind.substring(separator + 1);
+            }
+            final String targetGroupId = groupId;
+            ControlViewGroup viewGroup = menu.getController().viewGroups().stream()
+                    .filter(it -> it.getId().equals(targetGroupId))
+                    .findFirst().orElse(null);
+            if (viewGroup == null) {
+                continue;
+            }
+            switch (mode) {
+                case "show":
+                    menu.getViewManager().setViewGroupVisibility(viewGroup, true);
+                    break;
+                case "hide":
+                    menu.getViewManager().setViewGroupVisibility(viewGroup, false);
+                    break;
+                default:
+                    menu.getViewManager().switchViewGroupVisibility(viewGroup);
+                    break;
             }
         }
     }

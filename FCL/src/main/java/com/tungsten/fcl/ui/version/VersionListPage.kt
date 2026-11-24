@@ -7,6 +7,7 @@ import android.view.View
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.tabs.TabLayout
+import com.mio.ui.dialog.RendererOverrideDialog
 import com.tungsten.fcl.R
 import com.tungsten.fcl.databinding.PageVersionListBinding
 import com.tungsten.fcl.setting.Profiles
@@ -42,6 +43,7 @@ class VersionListPage(context: Context?, id: Int) :
         binding = PageVersionListBinding.bind(contentView)
         binding.refresh.setOnClickListener(this)
         binding.newProfile.setOnClickListener(this)
+        binding.renderer.setOnClickListener(this)
 
         viewModel = ViewModelProvider(getActivity()).get(VersionListViewModel::class.java)
         observeWhileAttached(viewModel.state) { render(it) }
@@ -133,6 +135,9 @@ class VersionListPage(context: Context?, id: Int) :
             adapter = VersionListAdapter(context, children)
             binding.versionList.adapter = adapter
             binding.versionList.layoutManager = LinearLayoutManager(context)
+            // 列表不播放条目动画：切换选中版本的局部刷新会被 DefaultItemAnimator
+            // 转成 move 动画，表现为整列上下弹跳
+            binding.versionList.itemAnimator = null
             adapter?.itemTouchHelper?.attachToRecyclerView(binding.versionList)
         }
         binding.progress.visibility = View.GONE
@@ -151,7 +156,13 @@ class VersionListPage(context: Context?, id: Int) :
             val entriesChanged = entryIds != lastEntryIds
             lastEntryIds = entryIds
             if (entriesChanged) {
-                binding.versionList.scrollToPosition(children.indexOf(selected))
+                // 仅当选中项不在可见范围内时才滚动定位（首次加载/安装/删除后）；
+                // 选中项已在视口内时拽动视口会被感知为列表跳动
+                val index = children.indexOf(selected)
+                val manager = binding.versionList.layoutManager as? LinearLayoutManager
+                if (manager == null || index !in manager.findFirstCompletelyVisibleItemPosition()..manager.findLastCompletelyVisibleItemPosition()) {
+                    binding.versionList.scrollToPosition(index)
+                }
             }
         }
     }
@@ -170,6 +181,10 @@ class VersionListPage(context: Context?, id: Int) :
         if (view === binding.newProfile) {
             val dialog = AddProfileDialog(context)
             dialog.show()
+        }
+        if (view === binding.renderer) {
+            // 静态入口：对话框内列出全部版本逐个设置渲染器覆盖，默认跟随全局/特定版本设置
+            RendererOverrideDialog(context).show()
         }
     }
 }

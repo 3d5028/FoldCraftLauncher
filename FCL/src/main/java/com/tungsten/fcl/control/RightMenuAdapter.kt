@@ -38,7 +38,8 @@ enum class RightMenuCategory(@param:StringRes val titleRes: Int) {
 enum class RightMenuTag {
     // 功能
     LOCK_VIEW, HIDE_VIEW, SHOW_FPS, OPEN_MULTIPLAYER, OPEN_QUICK_INPUT, OPEN_SEND_KEY, FULLSCREEN,
-    SOFT_KEYBOARD_ADJUST, ITEM_BAR_WIDTH, ITEM_BAR_HEIGHT, WINDOW_SCALE, CURSOR_OFFSET,
+    SOFT_KEYBOARD_ADJUST, IME_MAGNIFIER_AUTO_SHOW,
+    ITEM_BAR_WIDTH, ITEM_BAR_HEIGHT, WINDOW_SCALE, CURSOR_OFFSET,
 
     // 手势
     DISABLE_GESTURE, GESTURE_MODE, DISABLE_LEFT_TOUCH, SLIDE_ACCELERATION, DISTANCE_ACCELERATION,
@@ -58,7 +59,7 @@ enum class RightMenuTag {
 
     // 调试
     SHOW_MEMORY, PERFORMANCE_MODE, REQUEST_MAX_REFRESH_RATE, FORCE_RESOLUTION, FORCE_RESOLUTION_SIZE,
-    SHOW_LOG, AUTO_SHOW_LOG, FORCE_EXIT,
+    SHOW_LAUNCH_PROGRESS, SHOW_LOG, AUTO_SHOW_LOG, FORCE_EXIT,
 
     // SDL
     SDL_AUTO_SHOW_IME,
@@ -188,6 +189,11 @@ class RightMenuAdapter(
                 R.string.menu_settings_sdl_auto_show_ime,
                 { SdlSettings.sdlAutoShowIme.value },
                 RightMenuTag.SDL_AUTO_SHOW_IME
+            ),
+            Row.SwitchRow(
+                R.string.menu_settings_ime_magnifier_auto_show,
+                { menuSetting.isImeMagnifierAutoShow },
+                RightMenuTag.IME_MAGNIFIER_AUTO_SHOW
             ),
             Row.SwitchRow(
                 R.string.settings_launcher_ignore_notch,
@@ -409,6 +415,11 @@ class RightMenuAdapter(
             Row.ButtonRow(
                 R.string.menu_settings_force_resolution_size,
                 listOf(R.string.menu_settings_force_resolution_edit to RightMenuTag.FORCE_RESOLUTION_SIZE)
+            ),
+            Row.SwitchRow(
+                R.string.menu_settings_show_launch_progress,
+                { menuSetting.isShowLaunchProgress },
+                RightMenuTag.SHOW_LAUNCH_PROGRESS
             ),
             Row.SwitchRow(
                 R.string.menu_settings_show_log,

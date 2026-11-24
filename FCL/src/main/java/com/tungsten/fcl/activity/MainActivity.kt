@@ -218,8 +218,40 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
                 goSetting.setOnClickListener(this@MainActivity)
                 start.setOnClickListener(this@MainActivity)
                 start.setOnLongClickListener { view ->
-                    RendererSelectDialog(this@MainActivity, false) {
-                        onClick(view)
+                    // RendererSelectDialog 回调前已把选择写入版本设置（usesGlobal 时实为全局设置），
+                    // 旧值须在对话框打开前捕获，取消时回滚才有效
+                    val previousRenderer = Profiles.getSelectedProfile().versionSetting.renderer
+                    RendererSelectDialog(this@MainActivity, false) { picked ->
+                        val profile = Profiles.getSelectedProfile()
+                        val versionId = profile.selectedVersion
+                        val override = versionId?.let { profile.getEffectiveRendererOverride(it) }
+                        if (versionId != null && override != null && override != picked.id) {
+                            // 该版本有渲染器覆盖：此处修改会被遮蔽，提示后不直接启动，
+                            // 只有更新/清除覆盖才沿用本次选择继续启动
+                            val builder = FCLAlertDialog.Builder(this@MainActivity)
+                            builder.setAlertLevel(FCLAlertDialog.AlertLevel.INFO)
+                            builder.setMessage(
+                                getString(
+                                    R.string.message_warn_renderer_override_shadow,
+                                    versionId,
+                                    RendererManager.getRenderer(override).des
+                                )
+                            )
+                            builder.setPositiveButton(getString(R.string.renderer_update_override)) {
+                                profile.setRendererOverride(versionId, picked.id)
+                                onClick(view)
+                            }
+                            builder.setNeutralButton(getString(R.string.renderer_clear_override)) {
+                                profile.setRendererOverride(versionId, null)
+                                onClick(view)
+                            }
+                            builder.setNegativeButton(getString(R.string.dialog_negative)) {
+                                profile.versionSetting.renderer = previousRenderer
+                            }
+                            builder.create().show()
+                        } else {
+                            onClick(view)
+                        }
                     }.show()
                     true
                 }
@@ -342,16 +374,72 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
                         activity = this@MainActivity,
                         *buildList {
                             if (Accounts.getAccounts().isEmpty()) {
-                                add(GuideStep(GuideTag.Account, account, getString(R.string.guide_account)))
+                                add(
+                                    GuideStep(
+                                        GuideTag.Account,
+                                        account,
+                                        getString(R.string.guide_account)
+                                    )
+                                )
                             }
-                            add(GuideStep(GuideTag.VersionCard, versionCard, getString(R.string.guide_version_card)))
+                            add(
+                                GuideStep(
+                                    GuideTag.VersionCard,
+                                    versionCard,
+                                    getString(R.string.guide_version_card)
+                                )
+                            )
                             add(GuideStep(GuideTag.Start, start, getString(R.string.guide_start)))
-                            add(GuideStep(GuideTag.Manage, manage, getString(R.string.guide_manage)))
-                            add(GuideStep(GuideTag.Download, download, getString(R.string.guide_download)))
-                            add(GuideStep(GuideTag.Controller, controller, getString(R.string.guide_controller)))
-                            add(GuideStep(GuideTag.Multiplayer, multiplayer, getString(R.string.guide_multiplayer)))
-                            add(GuideStep(GuideTag.Theme2, setting, getString(R.string.guide_theme2)))
-                            add(GuideStep(GuideTag.ShareLog, home, getString(R.string.guide_share_log)))
+                            add(
+                                GuideStep(
+                                    GuideTag.Manage,
+                                    manage,
+                                    getString(R.string.guide_manage)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.Download,
+                                    download,
+                                    getString(R.string.guide_download)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.Controller,
+                                    controller,
+                                    getString(R.string.guide_controller)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.Multiplayer,
+                                    multiplayer,
+                                    getString(R.string.guide_multiplayer)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.Theme2,
+                                    setting,
+                                    getString(R.string.guide_theme2)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.ShareLog,
+                                    home,
+                                    getString(R.string.guide_share_log)
+                                )
+                            )
+                            // 皮肤模型引导：关闭皮肤模型显示时视图不可见，GuideUtil 自动跳过
+                            add(
+                                GuideStep(
+                                    GuideTag.SkinModel,
+                                    UIManager.instance.mainUI.skinViewer,
+                                    getString(R.string.guide_skin_model)
+                                )
+                            )
                         }.toTypedArray()
                     )
                 }
@@ -508,7 +596,7 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
 
     /** 按当前亮暗模式加载主界面背景（Theme.getBackground 按亮暗动态返回）。
      *  ThemeEngine 的刷新回调是全局 Handler 异步排队，Activity 销毁后仍未执行的
-     *  回调无法通过 onDestroy 注销取消，这里需防 Glide 对已销毁 Activity 加载崩溃 */
+     *  回调会持有已销毁实例，这里需跳过 */
     private fun loadBackground() {
         if (isDestroyed || isFinishing) return
         ImageUtil.loadInto(
@@ -775,7 +863,8 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
 
     /**
      * 启动前校验 26.2+（带 Vulkan 渲染后端）版本的设备支持情况：
-     * 缓存判定支持则直接启动，无缓存时询问是否检测，不支持时按版本警告或阻止
+     * OpenGL 后端不经过 Vulkan，直接启动；缓存判定支持则直接启动，
+     * 无缓存时询问是否检测，不支持时按已缓存结论警告并提示可改用 OpenGL 后端
      */
     private fun checkVulkanThenLaunch(profile: Profile, versionId: String?) {
         lifecycleScope.launch {
@@ -794,6 +883,11 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
                 doLaunchVersion(profile, versionId)
                 return@launch
             }
+            //显式选择 OpenGL 后端时不经过 Vulkan，无需检测
+            if (versionSetting.graphicsBackend == "opengl") {
+                doLaunchVersion(profile, versionId)
+                return@launch
+            }
             val useCustomDriver = !versionSetting.isVKDriverSystem
             val driver = if (useCustomDriver) {
                 DriverPlugin.driverList.find { it.driver == versionSetting.driver }
@@ -803,10 +897,23 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
                 VulkanEnsureResult.SUPPORTED -> doLaunchVersion(profile, versionId)
                 VulkanEnsureResult.NEED_CHECK ->
                     promptVulkanCheck(gameVersion, useCustomDriver, driver, profile, versionId)
+
                 VulkanEnsureResult.UNSUPPORTED ->
-                    runVulkanCheckAndDecide(gameVersion, useCustomDriver, driver, profile, versionId)
+                    warnVulkanUnsupported(profile, versionId)
             }
         }
+    }
+
+    /** 缓存判定不支持时沿用已缓存结论警告，不再重复检测；可改用 OpenGL 后端启动 */
+    private fun warnVulkanUnsupported(profile: Profile, versionId: String?) {
+        val builder = FCLAlertDialog.Builder(this)
+        builder.setAlertLevel(FCLAlertDialog.AlertLevel.ALERT)
+        builder.setMessage(getString(R.string.vulkan_check_launch_warning_cached))
+        builder.setPositiveButton(getString(R.string.vulkan_check_launch_continue)) {
+            doLaunchVersion(profile, versionId)
+        }
+        builder.setNegativeButton { }
+        builder.create().show()
     }
 
     /** 无有效检测结果时询问用户是否立即检测；取消则不检测直接启动 */
@@ -860,12 +967,18 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
             doLaunchVersion(profile, versionId)
             return
         }
-        val missing = support?.missingRequired
-            ?.joinToString("\n") { "· ${it.dependency.name}" }
-            .orEmpty()
+        val message = if (support == null) {
+            //检测失败没有缺失项可展示，使用不含明细的说明
+            getString(R.string.vulkan_check_launch_warning_cached)
+        } else {
+            getString(
+                R.string.vulkan_check_launch_warning,
+                support.missingRequired.joinToString("\n") { "· ${it.dependency.name}" }
+            )
+        }
         val builder = FCLAlertDialog.Builder(this)
         builder.setAlertLevel(FCLAlertDialog.AlertLevel.ALERT)
-        builder.setMessage(getString(R.string.vulkan_check_launch_warning, missing))
+        builder.setMessage(message)
         builder.setPositiveButton(getString(R.string.vulkan_check_launch_continue)) {
             doLaunchVersion(profile, versionId)
         }
@@ -980,7 +1093,7 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
                     binding.versionName.isSelected = true
                     binding.versionHint.text = libraries
                     binding.versionHint.isVisible = true
-                    binding.icon.setBackgroundDrawable(drawable)
+                    binding.icon.setImageDrawable(drawable)
                 }
             }
         } else {
@@ -988,7 +1101,7 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
             binding.versionProgress.visibility = View.GONE
             binding.versionName.text = getString(R.string.version_no_version)
             binding.versionHint.isVisible = false
-            binding.icon.setBackgroundDrawable(pixelAwareIcon(this, R.drawable.img_grass))
+            binding.icon.setImageDrawable(pixelAwareIcon(this, R.drawable.img_grass))
         }
     }
 

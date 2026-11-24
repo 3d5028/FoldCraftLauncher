@@ -454,6 +454,7 @@
     <string name="installer_recent_logs">最近日誌：</string>
     <string name="installer_process_retrying">安裝器進程超時，正在重試（%1$d/%2$d）…</string>
     <string name="installer_process_start_error">無法啟動安裝器進程</string>
+    <string name="installer_process_bad_state">安裝器進程多次崩潰，已被系統暫時禁止啟動，請稍候或重啟應用後重試</string>
     <string name="installer_process_no_exit_code">安裝器進程未返回退出碼，可能已經異常退出</string>
     <string name="installer_process_no_response">安裝器進程無回應，已強制結束</string>
     <string name="installer_process_failed_to_start">安裝器進程啟動失敗</string>
@@ -552,6 +553,8 @@
     <string name="menu_settings_send_key">發送鍵值</string>
     <string name="menu_settings_send_key_button">發送</string>
     <string name="menu_settings_soft_keyboard_adjust">禁用軟鍵盤自適應</string>
+    <string name="menu_settings_ime_magnifier_auto_show">輸入時預設彈出放大鏡</string>
+    <string name="game_magnifier_show">顯示遊戲放大鏡</string>
     <string name="menu_settings_item_bar_scale">物品欄縮放</string>
     <string name="menu_settings_item_bar_scale_width">物品欄縮放（寬度）</string>
     <string name="menu_settings_item_bar_scale_height">物品欄縮放（高度）</string>
@@ -630,7 +633,6 @@
     <string name="modpack_type_mcbbs_export">可以被 FCL，HMCL 同 MultiMC 導入</string>
     <string name="modpack_type_modrinth">Modrinth</string>
     <string name="modpack_type_multimc">MultiMC</string>
-    <string name="modpack_type_multimc_export">可以被 FCL，HMCL 同 MultiMC 導入</string>
     <string name="modpack_type_server">伺服器自動更新整合包</string>
     <string name="modpack_type_server_export">允許伺服器管理員遠程更新遊戲客戶端</string>
     <string name="modpack_type_server_malformed">伺服器整合包配置格式錯誤，請聯繫伺服器管理員解決此問題</string>
@@ -799,7 +801,6 @@
     <string name="settings_fcl_vulkan_driver_system">使用系統Vulkan驅動</string>
     <string name="settings_fcl_renderer">OpenGL實作方式 (渲染器)</string>
     <string name="settings_fcl_renderer_vgpu">VGPU (OpenGL 2.1+)</string>
-    <string name="settings_fcl_renderer_freedreno">Freedreno (OpenGL 4.6, 僅支持 adreno616-660)</string>
     <string name="settings_fcl_driver">Vulkan驅動</string>
     <string name="settings_download_netdisk">網盤</string>
     <string name="settings_game">遊戲設置</string>

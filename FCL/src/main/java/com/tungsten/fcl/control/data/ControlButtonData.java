@@ -67,11 +67,26 @@ public class ControlButtonData implements Cloneable, Observable, CustomControl {
     }
 
     public void setStyle(ControlButtonStyle style) {
+        ControlButtonStyle oldValue = styleProperty.get();
+        if (oldValue != null)
+            oldValue.removeListener(styleInvalidationListener);
         styleProperty.set(style);
+        if (style != null)
+            style.addListener(styleInvalidationListener);
     }
 
     public ControlButtonStyle getStyle() {
         return styleProperty.get();
+    }
+
+    /**
+     * 断开与样式对象的监听：数据被丢弃（删除控件、整表替换）前调用，
+     * 避免样式对象继续持有已废弃的数据实例。
+     */
+    public void detachStyleListener() {
+        ControlButtonStyle style = styleProperty.get();
+        if (style != null)
+            style.removeListener(styleInvalidationListener);
     }
 
     /**
@@ -113,7 +128,11 @@ public class ControlButtonData implements Cloneable, Observable, CustomControl {
         this.id = id;
 
         addPropertyChangedListener(onInvalidating(this::invalidate));
+        // re-render when the held style object's properties change in place
+        getStyle().addListener(styleInvalidationListener);
     }
+
+    private final InvalidationListener styleInvalidationListener = observable -> invalidate();
 
     public void addPropertyChangedListener(InvalidationListener listener) {
         textProperty.addListener(listener);

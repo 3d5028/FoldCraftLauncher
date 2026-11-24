@@ -15,6 +15,7 @@ import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 import android.widget.Toast;
 
@@ -54,11 +55,14 @@ import com.tungsten.fcl.control.data.DirectionStyles;
 import com.tungsten.fcl.control.data.QuickInputTexts;
 import com.tungsten.fcl.control.keyboard.LwjglCharSender;
 import com.tungsten.fcl.control.keyboard.TouchCharInput;
+import com.tungsten.fcl.control.view.EditHistory;
 import com.tungsten.fcl.control.view.GameItemBar;
+import com.tungsten.fcl.control.view.InputMagnifierView;
 import com.tungsten.fcl.control.view.LogWindow;
 import com.tungsten.fcl.control.view.MenuView;
 import com.tungsten.fcl.control.view.TouchPad;
 import com.tungsten.fcl.control.view.ViewManager;
+import com.mio.dialog.ItemSelectionDialog;
 import com.tungsten.fcl.game.sdl.GamepadInputMode;
 import com.tungsten.fcl.game.sdl.SdlBridge;
 import com.tungsten.fcl.game.sdl.SdlSettings;
@@ -127,6 +131,7 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
     public DraggableTextView fpsText;
     public DraggableTextView memoryText;
     private TouchCharInput touchCharInput;
+    private InputMagnifierView inputMagnifier;
     private TouchControllerInputView touchControllerInputView;
     private FCLProgressBar launchProgress;
     private CursorView cursorView;
@@ -139,6 +144,9 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
     private FCLTextView rightMenuTitle;
     private FCLTabLayout menuTabs;
     private FCLButton addGroupButton;
+    private LinearLayout editHistoryBar;
+    private FCLButton editHistoryUndoButton;
+    private FCLButton editHistoryRedoButton;
     private RecyclerView rightMenuList;
 
     private MultiplayerDialog multiplayerDialog;
@@ -225,6 +233,12 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
         return touchCharInput;
     }
 
+    public void captureMagnifierFrame() {
+        if (inputMagnifier != null) {
+            inputMagnifier.captureFrame();
+        }
+    }
+
     private final BooleanProperty editModeProperty = new SimpleBooleanProperty(this, "editMode", false);
 
     public BooleanProperty editModeProperty() {
@@ -292,6 +306,24 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
     }
 
     /**
+     * 编辑会话内是否允许直接编辑参考组控件（跨组编辑）：关闭时参考组仅作参照，不响应编辑触摸。
+     * 默认关闭，避免编辑当前组时误触参考组控件
+     */
+    private boolean crossGroupEditEnabled = false;
+
+    public boolean isCrossGroupEditEnabled() {
+        return crossGroupEditEnabled;
+    }
+
+    public void setCrossGroupEditEnabled(boolean enabled) {
+        crossGroupEditEnabled = enabled;
+        if (!enabled) {
+            // 取消参考组控件的选中，避免操作栏悬停在已冻结的控件上
+            viewManager.clearGhostSelection();
+        }
+    }
+
+    /**
      * 复制控件组：完整克隆按键与方向键数据（控件 id 重新生成），
      * 新组插入源组之后并立即在编辑画布显示
      */
@@ -331,6 +363,49 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
             viewManager.initializeController();
         });
         dialog.show();
+    }
+
+    /**
+     * 控件组合并：把 source 的全部控件移动到 target（控件 id 保持不变），原组保留但清空。
+     * 双方按键数据未加载时先按需加载再执行。
+     */
+    private void mergeViewGroup(ControlViewGroup source, ControlViewGroup target) {
+        if (source == null || target == null || source == target) {
+            return;
+        }
+        loadGroupThen(source, () -> loadGroupThen(target, () -> {
+            for (ControlButtonData button : new ArrayList<>(source.getViewData().buttonList())) {
+                target.getViewData().addButton(button);
+            }
+            for (ControlDirectionData direction : new ArrayList<>(source.getViewData().directionList())) {
+                target.getViewData().addDirection(direction);
+            }
+            source.getViewData().buttonList().clear();
+            source.getViewData().directionList().clear();
+            viewManager.saveController();
+            rightMenuAdapter.rebuild();
+            viewManager.initializeController();
+        }));
+    }
+
+    /** 数据就绪后（必要时按需加载）在主线程执行动作 */
+    private void loadGroupThen(ControlViewGroup group, Runnable action) {
+        if (group.isDataLoaded()) {
+            action.run();
+            return;
+        }
+        Controllers.loadViewGroup(getController(), group, new Controllers.ViewGroupLoadCallback() {
+            @Override
+            public void onLoaded(ControlViewGroup viewGroup) {
+                action.run();
+            }
+
+            @Override
+            public void onFailed(Throwable e) {
+                Logging.LOG.log(Level.WARNING, "Failed to load view group " + group.getId(), e);
+                Toast.makeText(getActivity(), getActivity().getString(R.string.edit_view_group_load_failed), Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     /**
@@ -436,6 +511,16 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
         leftMenuList.addItemDecoration(new SpacingDecoration(
                 Math.round(6 * activity.getResources().getDisplayMetrics().density)));
 
+        // 撤销/恢复操作区（抽屉底部固定、列表之外）：编辑历史由 ViewManager 持有，历史变化刷新置灰态
+        editHistoryBar = findViewById(R.id.edit_history_bar);
+        editHistoryUndoButton = findViewById(R.id.edit_history_undo);
+        editHistoryRedoButton = findViewById(R.id.edit_history_redo);
+        editHistoryUndoButton.setOnClickListener(v -> getViewManager().getEditHistory().undo());
+        editHistoryRedoButton.setOnClickListener(v -> getViewManager().getEditHistory().redo());
+        getViewManager().getEditHistory().setOnChanged(this::updateEditHistoryState);
+        editHistoryBar.setVisibility(isEditMode() ? View.VISIBLE : View.GONE);
+        updateEditHistoryState();
+
         getController().addListener(i -> leftMenuAdapter.rebuild());
         controllerProperty.addListener(invalidate -> {
             setViewGroup(null);
@@ -461,6 +546,9 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
                 if (addGroupButton != null) {
                     addGroupButton.setVisibility(View.GONE);
                 }
+                if (editHistoryBar != null) {
+                    editHistoryBar.setVisibility(View.GONE);
+                }
                 if (rightMenuTitle != null) {
                     rightMenuTitle.setVisibility(View.GONE);
                 }
@@ -475,6 +563,9 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
             }
             if (addGroupButton != null) {
                 addGroupButton.setVisibility(View.VISIBLE);
+            }
+            if (editHistoryBar != null) {
+                editHistoryBar.setVisibility(View.VISIBLE);
             }
             if (rightMenuTitle != null) {
                 rightMenuTitle.setVisibility(View.VISIBLE);
@@ -562,12 +653,39 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
 
             @Override
             public void onEditGroupEdit(@NonNull ControlViewGroup group) {
-                EditViewGroupDialog dialog = new EditViewGroupDialog(getActivity(), GameMenu.this, group, (name, visibility) -> {
-                    group.setName(name);
-                    group.setVisibility(visibility);
-                    getController().updateViewGroup(group);
-                    rightMenuAdapter.rebuild();
-                });
+                EditViewGroupDialog.Callback callback = new EditViewGroupDialog.Callback() {
+                    @Override
+                    public void onPositive(String name, ControlViewGroup.Visibility visibility) {
+                        group.setName(name);
+                        group.setVisibility(visibility);
+                        getController().updateViewGroup(group);
+                        rightMenuAdapter.rebuild();
+                    }
+
+                    @Override
+                    public boolean supportsMerge() {
+                        return true;
+                    }
+
+                    @Override
+                    public void onMergeToGroup(ControlViewGroup source) {
+                        // 选择目标组后把 source 全部控件转移过去（控件组合并）
+                        ArrayList<ControlViewGroup> candidates = new ArrayList<>(getController().viewGroups());
+                        candidates.remove(source);
+                        if (candidates.isEmpty()) {
+                            Toast.makeText(getActivity(), getActivity().getString(R.string.edit_view_no_group), Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        ArrayList<String> names = new ArrayList<>();
+                        for (ControlViewGroup group : candidates) {
+                            names.add(group.getName());
+                        }
+                        ItemSelectionDialog.show(getActivity(),
+                                getActivity().getString(R.string.select_target_group_title), names, true, -1,
+                                (position, item) -> mergeViewGroup(source, candidates.get(position)));
+                    }
+                };
+                EditViewGroupDialog dialog = new EditViewGroupDialog(getActivity(), GameMenu.this, group, callback);
                 dialog.show();
             }
 
@@ -681,6 +799,20 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
         logWindow.setVisibility(menuSetting.isShowLog() || (!isSimulated() && menuSetting.isAutoShowLog()));
     }
 
+    /** 撤销/恢复可用性：空栈半透明置灰禁点（EditHistory 每次记录/回放/清空后回调） */
+    private void updateEditHistoryState() {
+        if (editHistoryUndoButton == null || editHistoryRedoButton == null) {
+            return;
+        }
+        EditHistory history = getViewManager().getEditHistory();
+        boolean canUndo = history.canUndo();
+        boolean canRedo = history.canRedo();
+        editHistoryUndoButton.setEnabled(canUndo);
+        editHistoryUndoButton.setAlpha(canUndo ? 1f : 0.4f);
+        editHistoryRedoButton.setEnabled(canRedo);
+        editHistoryRedoButton.setAlpha(canRedo ? 1f : 0.4f);
+    }
+
     @Override
     public void setup(FCLActivity activity, FCLBridge fclBridge) {
         this.activity = activity;
@@ -740,13 +872,17 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
         fpsText = findViewById(R.id.fps);
         memoryText = findViewById(R.id.memory);
         touchCharInput = findViewById(R.id.input_scanner);
+        inputMagnifier = findViewById(R.id.input_magnifier);
         touchControllerInputView = findViewById(R.id.touchcontroller_input_view);
         launchProgress = findViewById(R.id.launch_progress);
         cursorView = findViewById(R.id.cursor);
 
         if (!isSimulated()) {
-            ImageUtil.loadInto(baseLayout, ThemeEngine.getInstance().getTheme().getBackground(activity));
-            launchProgress.setVisibility(View.VISIBLE);
+            inputMagnifier.setup(activity.findViewById(R.id.texture_view), touchCharInput, menuSetting);
+            if (menuSetting.isShowLaunchProgress()) {
+                ImageUtil.loadInto(baseLayout, ThemeEngine.getInstance().getTheme().getBackground(activity));
+                launchProgress.setVisibility(View.VISIBLE);
+            }
             assert getBridge() != null;
             gameOption = new GameOption(getBridge().getGameDir());
             touchPad.post(() -> gameItemBar.setup(this, gameOption));
@@ -891,8 +1027,12 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
         }
     }
 
+    /** 游戏是否已渲染首帧（onGraphicOutput 置位），日志窗自动显隐的阶段判断依据 */
+    private boolean graphicOutput = false;
+
     @Override
     public void onGraphicOutput() {
+        graphicOutput = true;
         baseLayout.setBackground(null);
         baseLayout.removeView(launchProgress);
         if (!menuSetting.isShowLog() && menuSetting.isAutoShowLog()) {
@@ -1066,6 +1206,9 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
             case SNAP_ADJACENT_ONLY:
                 menuSetting.setSnapAdjacentOnly(checked);
                 break;
+            case CROSS_GROUP_EDIT:
+                setCrossGroupEditEnabled(checked);
+                break;
         }
     }
 
@@ -1160,6 +1303,9 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
             case SOFT_KEYBOARD_ADJUST:
                 menuSetting.setDisableSoftKeyAdjust(checked);
                 break;
+            case IME_MAGNIFIER_AUTO_SHOW:
+                menuSetting.setImeMagnifierAutoShow(checked);
+                break;
             case FORCE_RESOLUTION:
                 menuSetting.setForceResolution(checked);
                 if (checked) {
@@ -1233,14 +1379,19 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
                 // 后续焦点恢复/onPostResume 会按主题值重放全屏标志
                 ThemeEngine.getInstance().applyAndSave(activity, activity.getWindow(), checked);
                 break;
+            case SHOW_LAUNCH_PROGRESS:
+                // 无即时副作用，下次启动生效
+                menuSetting.setShowLaunchProgress(checked);
+                break;
             case SHOW_LOG:
                 menuSetting.setShowLog(checked);
                 logWindow.setVisibility(menuSetting.isShowLog());
                 break;
             case AUTO_SHOW_LOG:
                 menuSetting.setAutoShowLog(checked);
-                if (baseLayout.getBackground() != null) {
-                    logWindow.setVisibility(menuSetting.isAutoShowLog());
+                // 仅首帧渲染前即时生效（此时日志窗由启动流程接管显隐）；首帧后不再打断现状
+                if (!graphicOutput) {
+                    logWindow.setVisibility(menuSetting.isShowLog() || (!isSimulated() && checked));
                 }
                 break;
             case SDL_AUTO_SHOW_IME:
